@@ -1,128 +1,149 @@
+// background.js (MV3 service worker)
+// Responsible for: context menu lifecycle, calls to Gemini API, sending messages to content scripts.
+
 const defaultPresets = [
-    { id: 'p1', title: '👔 Professional', prompt: 'Rewrite this to be professional and clear.' },
-    { id: 'p2', title: '✂️ Shorten', prompt: 'Concise and punchy. Remove fluff.' },
-    { id: 'p3', title: '🤔 Explain', prompt: 'Explain this concept simply.' }
+  { id: 'p1', title: '👔 Professional', prompt: 'Rewrite this to be professional and clear.' },
+  { id: 'p2', title: '✂️ Shorten', prompt: 'Concise and punchy. Remove fluff.' },
+  { id: 'p3', title: '🤔 Explain', prompt: 'Explain this concept simply.' }
 ];
 
-// 1. Setup Menus on Install or Startup
 chrome.runtime.onInstalled.addListener(refreshMenus);
 chrome.runtime.onStartup.addListener(refreshMenus);
 
-// 2. Listen for changes in Presets
 chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && changes.customPresets) {
-        refreshMenus();
-    }
+  if (area === 'local' && changes.customPresets) {
+    refreshMenus();
+  }
 });
 
 function refreshMenus() {
-    chrome.contextMenus.removeAll(() => {
-        
-        // Static Commands
-        chrome.contextMenus.create({ id: "continue_text", title: "🚀 Continue writing...", contexts: ["selection"] });
-        chrome.contextMenus.create({ id: "sep1", type: "separator", contexts: ["selection"] });
+  chrome.contextMenus.removeAll(() => {
+    // static items
+    chrome.contextMenus.create({
+      id: "continue_text",
+      title: "🚀 Continue writing...",
+      contexts: ["selection"]
+    });
 
-        // Load Presets
-        chrome.storage.local.get(['customPresets'], (res) => {
-            const presets = res.customPresets || defaultPresets;
-            presets.forEach(p => {
-                chrome.contextMenus.create({
-                    id: p.id,
-                    title: p.title,
-                    contexts: ["selection"]
-                });
-            });
+    chrome.contextMenus.create({
+      id: "sep1",
+      type: "separator",
+      contexts: ["selection"]
+    });
+
+    // dynamic presets (load from storage)
+    chrome.storage.local.get(['customPresets'], (res) => {
+      const presets = res.customPresets || defaultPresets;
+      for (const p of presets) {
+        chrome.contextMenus.create({
+          id: p.id,
+          title: p.title,
+          contexts: ["selection"]
         });
+      }
     });
+  });
 }
 
-// 3. Handle Clicks
+// Helper: promisified storage get
+function getStorage(keys) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(keys, (res) => resolve(res || {}));
+  });
+}
+
+// Helper: call Gemini API
+async function callGemini(model, apiKey, prompt) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }]
+  };
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Gemini API error: ${resp.status} ${txt}`);
+  }
+
+  return resp.json();
+}
+
+// Context menu click handler
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-    const text = info.selectionText;
-    
-    chrome.storage.local.get(['geminiApiKey', 'selectedModel', 'customPresets'], async (res) => {
-        if (!res.geminiApiKey) {
-            chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                func: () => alert("⚠️ Please set your API Key in the Gemini Extension Panel first.")
-            });
-            return;
-        }
+  // If no tab (e.g., clicked from a non-tab context) bail
+  if (!tab || !tab.id) return;
 
-        // Determine Prompt
-        let prompt = "";
-        const model = res.selectedModel || "gemini-2.5-flash";
-        const presets = res.customPresets || defaultPresets;
+  const selectionText = info.selectionText || '';
+  if (!selectionText.trim()) return;
 
-        if (info.menuItemId === "continue_text") {
-            prompt = `Continue the following text naturally. Return ONLY the new text: "${text}"`;
-        } else {
-            const preset = presets.find(p => p.id === info.menuItemId);
-            if (preset) prompt = `${preset.prompt} Return ONLY the rewritten text: "${text}"`;
-        }
+  const { geminiApiKey, selectedModel, customPresets } = await getStorage(['geminiApiKey', 'selectedModel', 'customPresets']);
 
-        if (!prompt) return;
+  if (!geminiApiKey) {
+    // Ask the content script to show an alert in the page frame where the menu was used
+    const frameId = (typeof info.frameId !== 'undefined') ? info.frameId : 0;
+    chrome.tabs.sendMessage(tab.id, { action: 'alert', message: '⚠️ Please set your API Key in the Gemini Extension Panel first.' }, { frameId }, () => {});
+    return;
+  }
 
-        try {
-            // Visual feedback (change cursor to wait)
-            chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                func: () => document.body.style.cursor = 'wait'
-            });
+  // Determine prompt
+  const model = selectedModel || 'gemini-2.5-flash';
+  const presets = customPresets || defaultPresets;
 
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${res.geminiApiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-            });
+  let prompt = '';
+  if (info.menuItemId === 'continue_text') {
+    prompt = `Continue the following text naturally. Return ONLY the new text: "${selectionText}"`;
+  } else {
+    const preset = presets.find(p => p.id === info.menuItemId);
+    if (preset) {
+      prompt = `${preset.prompt} Return ONLY the rewritten text: "${selectionText}"`;
+    }
+  }
 
-            const data = await response.json();
-            const newText = data.candidates[0].content.parts[0].text.trim();
+  if (!prompt) return;
 
-            // Inject Result
-            chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                func: replaceSelectedText,
-                args: [newText, info.menuItemId]
-            });
+  // Optional: tell the page to show a busy cursor
+  const frameId = (typeof info.frameId !== 'undefined') ? info.frameId : 0;
+  chrome.tabs.sendMessage(tab.id, { action: 'setCursor', cursor: 'wait' }, { frameId }, () => {});
 
-        } catch (error) {
-            console.error("Gemini Error:", error);
-        } finally {
-            // Reset cursor
-            chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                func: () => document.body.style.cursor = 'default'
-            });
-        }
+  try {
+    const data = await callGemini(model, geminiApiKey, prompt);
+    // safe path to the text (guarding against unexpected response shape)
+    const newText = (
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ??
+      data?.response?.output ?? // other possible shapes
+      ''
+    ).toString().trim();
+
+    if (!newText) {
+      throw new Error('Empty response from Gemini API');
+    }
+
+    // Send the injection request to the correct frame (if available)
+    chrome.tabs.sendMessage(tab.id, {
+      action: 'inject',
+      text: newText,
+      mode: info.menuItemId
+    }, { frameId }, (resp) => {
+      if (chrome.runtime.lastError) {
+        // This can occur if no content script is present in that frame or messaging fails
+        console.warn('Failed to send message to content script:', chrome.runtime.lastError.message);
+        // As a fallback, try to send to top frame
+        chrome.tabs.sendMessage(tab.id, { action: 'inject', text: newText, mode: info.menuItemId }, (resp2) => {
+          if (chrome.runtime.lastError) console.error('Fallback messaging failed:', chrome.runtime.lastError.message);
+        });
+      }
     });
+  } catch (err) {
+    console.error('Gemini error:', err);
+    // Inform user on the page
+    chrome.tabs.sendMessage(tab.id, { action: 'alert', message: `Gemini Error: ${err.message}` }, { frameId }, () => {});
+  } finally {
+    // Reset cursor
+    chrome.tabs.sendMessage(tab.id, { action: 'setCursor', cursor: 'default' }, { frameId }, () => {});
+  }
 });
-
-// 4. Injection Logic
-function replaceSelectedText(replacementText, mode) {
-    const activeElement = document.activeElement;
-    
-    // Inputs & Textareas
-    if (activeElement && (activeElement.tagName === 'TEXTAREA' || activeElement.tagName === 'INPUT')) {
-        const start = activeElement.selectionStart;
-        const end = activeElement.selectionEnd;
-        const originalText = activeElement.value;
-        
-        let finalText = "";
-        if (mode === "continue_text") {
-            finalText = originalText.slice(0, end) + " " + replacementText + originalText.slice(end);
-        } else {
-            finalText = originalText.slice(0, start) + replacementText + originalText.slice(end);
-        }
-
-        activeElement.value = finalText;
-        activeElement.dispatchEvent(new Event('input', { bubbles: true }));
-    } 
-    // ContentEditable (Google Docs, specialized editors - harder to support perfectly, but simple ones work)
-    else if (activeElement && activeElement.isContentEditable) {
-        document.execCommand('insertText', false, replacementText);
-    }
-    else {
-        alert("Gemini Result:\n\n" + replacementText);
-    }
-}

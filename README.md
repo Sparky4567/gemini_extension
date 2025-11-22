@@ -1,7 +1,7 @@
 # Gemini Writing Engine (Chrome Extension)
 
-**Version:** 2.0  
-**Engine:** Google Gemini 1.5 (Flash & Pro)  
+**Version:** 2.0.1
+**Engine:** Google Gemini 1.5 (Flash & Pro)
 **Architecture:** Manifest V3 (Side Panel + Context Menus)
 
 ## 🚀 Overview
@@ -67,3 +67,25 @@ You can define your own writing styles.
 * **"Error: Please set API Key":** You didn't paste the key in the settings panel.
 * **Menu doesn't appear:** If you just added a preset, reload the extension in `chrome://extensions`.
 * **Text doesn't change:** Some complex websites (like Google Docs or heavy React apps) block external script injection. In these cases, the extension will pop up an `Alert` box with the result so you can copy-paste it manually.
+
+**Recent updates:** Blogger and Wordpress editor support 
+
+
+### Blogger usage (Open post editor, swith to HTML editor mode after configuring a custom preset option)
+
+How to configure custom preset
+```
+Add your custom preset - for example:
+
+Write a blog post (Field name) Output only HTML paragraphs and headings, write a blog post about (Prompt) - Press plus sign to save the preset
+
+```
+
+### Wordpress usage (Open post editor, add an HTML block after configuring a custom preset option)
+
+```
+Add your custom preset - for example:
+
+Write a Wordpress blog post (Field name) Output only HTML paragraphs and headings, write a blog post about (Prompt) - Press plus sign to save the preset
+
+```
